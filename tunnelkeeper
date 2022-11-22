@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+
+REALPATH="$(realpath $0)"
+BASEDIR="${REALPATH%/*}"
+
+mkdir -p "$BASEDIR/var"
+mkdir -p "$BASEDIR/etc"
+CONFFILE="$BASEDIR/etc/tunnels.conf"
+
+if [[ ! -f "$CONFFILE" ]]; then
+  echo "Config file \"$CONFFILE\" does not exist"
+  exit 1
+fi
+
+case "$1" in
+  FORKSTART )
+    touch "$BASEDIR/var/${2}.connected"
+    while [[ -e "$BASEDIR/var/${2}.connected" ]]; do
+      ssh -F $CONFFILE -N $2 &> /dev/null
+      sleep 5
+    done
+  ;;
+  FORKKILL )
+    kill $(sudo netstat -tnlp | grep "127.0.0.1:${2}" | grep -o '[0-9]*/ssh' | grep -o '[0-9]*') &>/dev/null
+  ;;
+  FORKDEL )
+    rm "$BASEDIR/var/${2}.connected"
+  ;;
+  start)
+    if [[ -e "$BASEDIR/var/tunnelkeeper.pid" ]]; then
+      exit
+    fi
+    echo $$ > "$BASEDIR/var/tunnelkeeper.pid"
+    cat $CONFFILE | grep '^Host ' | sed 's/^Host //' | xargs -I% -P0 $0 FORKSTART % &>/dev/null &
+  ;;
+  stop)
+    rm "$BASEDIR/var/tunnelkeeper.pid"
+    cat $CONFFILE | grep '^Host ' | sed 's/^Host //' | xargs -I% -P0 $0 FORKDEL %
+    cat $CONFFILE | grep -o 'LocalForward [0-9]* ' | grep -o '[0-9]*' | xargs -I% -P0 $0 FORKKILL % &>/dev/null
+  ;;
+  install )
+    if [[ $UID -ne 0 ]]; then
+      echo "You must be root to do this"
+      exit
+    fi
+    mkdir -p /opt/tunnelkeeper/var
+    mkdir -p /opt/tunnelkeeper/etc
+    if [[ -f "$BASEDIR/etc/tunnels.conf" ]]; then
+      cp "$BASEDIR/etc/tunnels.conf" /opt/tunnelkeeper/etc
+    fi
+    cp "$REALPATH" "/opt/tunnelkeeper/tunnelkeeper.sh"
+    echo "[Unit]
+Description=TunnelKeeper keeps SSH tunnels open.
+After=network.target
+[Service]
+User=root
+Group=root
+Type=forking
+ExecStart=/opt/tunnelkeeper/tunnelkeeper.sh start
+ExecStop=/opt/tunnelkeeper/tunnelkeeper.sh stop
+RestartSec=15
+Restart=always
+[Install]
+WantedBy=multi-user.target" >> /lib/systemd/system/tunnelkeeper.service
+    systemctl daemon-reload
+    systemctl enable tunnelkeeper.service
+    echo "tunnelkeeper service installed"
+  ;;
+  * )
+    echo -e "\nUsage: $(basename $0) [start|stop|install]\n"
+  ;;
+esac
