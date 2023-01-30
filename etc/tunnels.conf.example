@@ -1,9 +1,0 @@
-Host server1
-  Hostname 123.45.67.89
-  User ubuntu
-  LocalForward 10001 127.0.0.1:22
-
-Host server1
-  Hostname 123.45.67.90
-  User ubuntu
-  LocalForward 10002 127.0.0.1:22
