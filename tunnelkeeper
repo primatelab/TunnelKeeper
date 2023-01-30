@@ -3,70 +3,127 @@
 REALPATH="$(realpath $0)"
 BASEDIR="${REALPATH%/*}"
 
-mkdir -p "$BASEDIR/var"
-mkdir -p "$BASEDIR/etc"
-CONFFILE="$BASEDIR/etc/tunnels.conf"
-
-if [[ ! -f "$CONFFILE" ]]; then
-  echo "Config file \"$CONFFILE\" does not exist"
-  exit 1
+if [[ "${1}" == "start" ]]; then
+  rm $BASEDIR/var/*.conf &>/dev/null         # Create separate .conf files in var/ from etc/tunnelkeeper.conf
+  awk -v "dir=$BASEDIR/var" '
+    /^\[/ {sec=$1}
+    !/^[#\[]/ {print >> dir"/"sec".conf"}' < $BASEDIR/etc/tunnelkeeper.conf &>/dev/null
 fi
+
+SSHCONF="$BASEDIR/var/[ssh].conf"
+TKCONF="$BASEDIR/var/[settings].conf"
+PWCONF="$BASEDIR/var/[passwords].conf"
+
+function ruroot () {
+  if [[ $UID -ne 0 ]]; then
+    echo "You must be root to do this"
+    exit
+  fi
+}
+
+DEBUGLEVEL=$(grep -i -m1 "debug" $TKCONF | grep -o [0-9])
+case "$DEBUGLEVEL" in
+  2) dbgopt='-v';;
+  3) dbgopt='-vvv';;
+  *) dbgopt='';;
+esac
+
+function dbg () {
+  [[ $DEBUGLEVEL != "0" ]] && logger -t tunnelkeeper
+}
 
 case "$1" in
   FORKSTART )
-    touch "$BASEDIR/var/${2}.connected"
+    echo -n $$ > "$BASEDIR/var/${2}.connected"
+    if [[ $(grep -c "^$2" $PWCONF) -gt 0 ]]; then
+      pass=$(awk "/^$2/ {print \$2}" ${PWCONF}) # password needed
+      screen -d -m -S "tk${2}" $0 FORKSCREEN $2
+      while [[ -e "$BASEDIR/var/${2}.connected" ]]; do
+        sleep 5
+        if [[ -f "$BASEDIR/var/${2}.screen" ]]; then
+          screen -S "tk${2}" -X stuff "$pass
+"
+          rm -f "$BASEDIR/var/${2}.screen"
+        fi
+      done
+    else # passwordless auth
+      while [[ -e "$BASEDIR/var/${2}.connected" ]]; do
+        ssh -F "${SSHCONF}" $dbgopt -N $2 2>&1 | dbg
+        sleep 5
+      done
+    fi
+  ;;
+  FORKSCREEN )
     while [[ -e "$BASEDIR/var/${2}.connected" ]]; do
-      ssh -F $CONFFILE -N $2 &> /dev/null
-      sleep 5
+      echo $$ > "$BASEDIR/var/${2}.screen"
+      ssh -F "${SSHCONF}" $dbgopt -N $2 2>&1 | dbg
     done
   ;;
-  FORKKILL )
-    kill $(sudo netstat -tnlp | grep "127.0.0.1:${2}" | grep -o '[0-9]*/ssh' | grep -o '[0-9]*') &>/dev/null
-  ;;
-  FORKDEL )
-    rm "$BASEDIR/var/${2}.connected"
-  ;;
+  FORKKILL ) kill $(sudo netstat -tnlp | grep "127[0-9\.]*:${2}" | grep -o '[0-9]*/ssh' | grep -o '[0-9]*') &>/dev/null ;;
+  FORKDEL ) rm "$BASEDIR/var/${2}.connected" ;;
   start)
-    if [[ -e "$BASEDIR/var/tunnelkeeper.pid" ]]; then
-      exit
-    fi
+    [[ -e "$BASEDIR/var/tunnelkeeper.pid" ]] && exit
     echo $$ > "$BASEDIR/var/tunnelkeeper.pid"
-    cat $CONFFILE | grep '^Host ' | sed 's/^Host //' | xargs -I% -P0 $0 FORKSTART % &>/dev/null &
+    cat "$SSHCONF" | awk '/^Host / {print $2}' | xargs -I% -P0 $0 FORKSTART % &
   ;;
   stop)
     rm "$BASEDIR/var/tunnelkeeper.pid"
-    cat $CONFFILE | grep '^Host ' | sed 's/^Host //' | xargs -I% -P0 $0 FORKDEL %
-    cat $CONFFILE | grep -o 'LocalForward [0-9]* ' | grep -o '[0-9]*' | xargs -I% -P0 $0 FORKKILL % &>/dev/null
+    cat "$SSHCONF" | awk '/^Host / {print $2}' | sed 's/^Host //' | xargs -I% -P0 $0 FORKDEL %
+    cat "$SSHCONF" | grep -o 'LocalForward [0-9]* ' | grep -o '[0-9]*' | xargs -I% -P0 $0 FORKKILL %
+  ;;
+  restart) 
+    if systemctl status tunnelkeeper &>/dev/null; then
+      systemctl restart tunnelkeeper
+    else
+      $0 stop; sleep 2; $0 start
+    fi
   ;;
   install )
-    if [[ $UID -ne 0 ]]; then
-      echo "You must be root to do this"
-      exit
-    fi
+    ruroot
+    which screen &>/dev/null || yum install -y screen || apt install -y screen
     mkdir -p /opt/tunnelkeeper/var
     mkdir -p /opt/tunnelkeeper/etc
-    if [[ -f "$BASEDIR/etc/tunnels.conf" ]]; then
-      cp "$BASEDIR/etc/tunnels.conf" /opt/tunnelkeeper/etc
+    if [[ "$BASEDIR" != '/opt/tunnelkeeper/' ]]; then
+      cp -n "$BASEDIR/etc/tunnelkeeper.conf" /opt/tunnelkeeper/etc/
+      cp "$REALPATH" "/opt/tunnelkeeper/tunnelkeeper"
     fi
-    cp "$REALPATH" "/opt/tunnelkeeper/tunnelkeeper.sh"
+    ln -f -s /opt/tunnelkeeper/tunnelkeeper /usr/local/bin/tunnelkeeper
     echo "[Unit]
-Description=TunnelKeeper keeps SSH tunnels open.
+Description=TunnelKeeper SSH tunnel utility.
 After=network.target
 [Service]
 User=root
 Group=root
 Type=forking
-ExecStart=/opt/tunnelkeeper/tunnelkeeper.sh start
-ExecStop=/opt/tunnelkeeper/tunnelkeeper.sh stop
+ExecStart=/opt/tunnelkeeper/tunnelkeeper start
+ExecStop=/opt/tunnelkeeper/tunnelkeeper stop
 RestartSec=15
 Restart=always
 [Install]
-WantedBy=multi-user.target" >> /lib/systemd/system/tunnelkeeper.service
+WantedBy=multi-user.target" > /lib/systemd/system/tunnelkeeper.service
     systemctl daemon-reload
     systemctl enable tunnelkeeper.service
-    echo "tunnelkeeper service installed"
+    echo -e "\nTunnelKeeper service installed.\n"
   ;;
-  * )
-    echo -e "\nUsage: $(basename $0) [start|stop|install]\n"
+  uninstall )
+    ruroot
+    systemctl disable tunnelkeeper.service
+    rm /usr/local/bin/tunnelkeeper
+    rm /lib/systemd/system/tunnelkeeper.service
+    systemctl daemon-reload
+    rm -rf /opt/tunnelkeeper
+    echo -e "\nTunnelKeeper service uninstalled.\n"
+  ;;
+  list )
+    echo "---"
+    find "$BASEDIR/var/" -name '*.connected' | sed 's/^.*\///g; s/\.connected//g'
+    echo "---"
+  ;;
+  config )
+    ruroot
+    vi "$BASEDIR/etc/tunnelkeeper.conf"
+  ;;
+   * )
+    echo -e "\nUsage: $(basename $0) start|stop|restart|install|uninstall|config|list\n"
   ;;
 esac
