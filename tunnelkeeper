@@ -48,7 +48,7 @@ case "$1" in
       done
     else # passwordless auth
       while [[ -e "$BASEDIR/var/${2}.connected" ]]; do
-        ssh -F "${SSHCONF}" $dbgopt -N $2 2>&1 | dbg
+        ssh -F "${SSHCONF}" $dbgopt -N $2 '#tunnelkeeper' 2>&1 | dbg
         sleep 5
       done
     fi
@@ -56,11 +56,12 @@ case "$1" in
   FORKSCREEN )
     while [[ -e "$BASEDIR/var/${2}.connected" ]]; do
       echo $$ > "$BASEDIR/var/${2}.screen"
-      ssh -F "${SSHCONF}" $dbgopt -N $2 2>&1 | dbg
+      ssh -F "${SSHCONF}" $dbgopt -N $2  '#tunnelkeeper' 2>&1 | dbg
     done
   ;;
-  FORKKILL ) kill $(sudo netstat -tnlp | grep "127[0-9\.]*:${2}" | grep -o '[0-9]*/ssh' | grep -o '[0-9]*') &>/dev/null ;;
+  # FORKKILL ) kill $(sudo netstat -tnlp | grep "127[0-9\.]*:${2}" | grep -o '[0-9]*/ssh' | grep -o '[0-9]*') &>/dev/null ;;
   FORKDEL ) rm "$BASEDIR/var/${2}.connected" ;;
+  FORKKILL ) pkill -f '#tunnelkeeper' &>/dev/null ;;
   start)
     [[ -e "$BASEDIR/var/tunnelkeeper.pid" ]] && exit
     echo $$ > "$BASEDIR/var/tunnelkeeper.pid"
