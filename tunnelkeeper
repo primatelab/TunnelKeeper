@@ -21,7 +21,7 @@ function ruroot () {
   fi
 }
 
-DEBUGLEVEL=$(grep -i -m1 "debug" $TKCONF | grep -o [0-9])
+DEBUGLEVEL=$(awk '/^debug/ {print $2}' $TKCONF &>/dev/null)
 case "$DEBUGLEVEL" in
   2) dbgopt='-v';;
   3) dbgopt='-vvv';;
@@ -31,6 +31,11 @@ esac
 function dbg () {
   [[ $DEBUGLEVEL != "0" ]] && logger -t tunnelkeeper
 }
+
+function connect () {
+  ssh -F "${SSHCONF}" $dbgopt -N $1 '#tunnelkeeper' 2>&1 | dbg
+}
+
 
 case "$1" in
   FORKSTART )
@@ -48,31 +53,30 @@ case "$1" in
       done
     else # passwordless auth
       while [[ -e "$BASEDIR/var/${2}.connected" ]]; do
-        ssh -F "${SSHCONF}" $dbgopt -N $2 '#tunnelkeeper' 2>&1 | dbg
+        connect $2
         sleep 5
       done
     fi
+    exit
   ;;
   FORKSCREEN )
     while [[ -e "$BASEDIR/var/${2}.connected" ]]; do
       echo $$ > "$BASEDIR/var/${2}.screen"
-      ssh -F "${SSHCONF}" $dbgopt -N $2  '#tunnelkeeper' 2>&1 | dbg
+      connect $2
     done
+    exit
   ;;
-  # FORKKILL ) kill $(sudo netstat -tnlp | grep "127[0-9\.]*:${2}" | grep -o '[0-9]*/ssh' | grep -o '[0-9]*') &>/dev/null ;;
-  FORKDEL ) rm "$BASEDIR/var/${2}.connected" ;;
-  FORKKILL ) pkill -f '#tunnelkeeper' &>/dev/null ;;
   start)
     [[ -e "$BASEDIR/var/tunnelkeeper.pid" ]] && exit
     echo $$ > "$BASEDIR/var/tunnelkeeper.pid"
     cat "$SSHCONF" | awk '/^Host / {print $2}' | xargs -I% -P0 $0 FORKSTART % &
   ;;
-  stop)
-    rm "$BASEDIR/var/tunnelkeeper.pid"
-    cat "$SSHCONF" | awk '/^Host / {print $2}' | sed 's/^Host //' | xargs -I% -P0 $0 FORKDEL %
-    cat "$SSHCONF" | grep -o 'LocalForward [0-9]* ' | grep -o '[0-9]*' | xargs -I% -P0 $0 FORKKILL %
+  stop )
+    rm -f "$BASEDIR/var/tunnelkeeper.pid"
+    rm -f "$BASEDIR/var/*.connected"
+    pkill -f 'tunnelkeeper' &>/dev/null
   ;;
-  restart) 
+  restart ) 
     if systemctl status tunnelkeeper &>/dev/null; then
       systemctl restart tunnelkeeper
     else
