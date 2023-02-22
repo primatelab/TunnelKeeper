@@ -8,6 +8,7 @@ Edit the config file `/opt/tunnelkeeper/etc/tunnelkeeper.conf`. If you make chan
 There are 3 sections:
 #### settings
 - `debug [0..3]`: Debug logging levels 0 (no logging) to 3 (too much logging)
+- `timeout 60`: Time between tunnel echo checks. Default 60.
 #### ssh
 - It's an ssh config file, so see `man ssh_config` for information. TunnelKeeper will connect to each host listed, and make sure every connection in `tunnelkeeper.conf` stays open in the background.
 #### passwords
