@@ -22,28 +22,32 @@ function ruroot () {
 }
 
 DEBUGLEVEL=$(awk '/^debug/ {print $2}' $TKCONF &>/dev/null)
+[[ -z $DEBUGLEVEL ]] && DEBUGLEVEL='0'
 case "$DEBUGLEVEL" in
   2) dbgopt='-v';;
   3) dbgopt='-vvv';;
   *) dbgopt='';;
 esac
 
+TIMEOUT=$(awk '/^timeout/ {print $2}' $TKCONF &>/dev/null)
+[[ -z $TIMEOUT ]] && TIMEOUT='60'
+
 function dbg () {
   [[ $DEBUGLEVEL != "0" ]] && logger -t tunnelkeeper
 }
 
 function connect () {
-  ssh -F "${SSHCONF}" $dbgopt -N $1 '#tunnelkeeper' 2>&1 | dbg
+  ssh -F "${SSHCONF}" $dbgopt -o "ControlMaster auto" -o "StrictHostKeyChecking no" -S "$BASEDIR/var/$1.tksock" -N $1 '#tunnelkeeper' 2>&1 | dbg
 }
 
 
 case "$1" in
   FORKSTART )
-    echo -n $$ > "$BASEDIR/var/${2}.connected"
+    $0 FORKWATCH $2 '#tunnelkeeper' &
     if [[ $(grep -c "^$2" $PWCONF) -gt 0 ]]; then
       pass=$(awk "/^$2/ {print \$2}" ${PWCONF}) # password needed
-      screen -d -m -S "tk${2}" $0 FORKSCREEN $2
-      while [[ -e "$BASEDIR/var/${2}.connected" ]]; do
+      screen -d -m -S "tk${2}" $0 FORKSCREEN $2 '#tunnelkeeper'
+      while true; do
         sleep 5
         if [[ -f "$BASEDIR/var/${2}.screen" ]]; then
           screen -S "tk${2}" -X stuff "$pass
@@ -52,29 +56,40 @@ case "$1" in
         fi
       done
     else # passwordless auth
-      while [[ -e "$BASEDIR/var/${2}.connected" ]]; do
+      while true; do
         connect $2
         sleep 5
       done
     fi
     exit
   ;;
+  FORKWATCH ) # makes sure the connection is still working, even if ssh doesn't drop it
+    while true; do
+      sleep $TIMEOUT
+      echo "tick $2" | dbg
+      if [[ $(timeout $TIMEOUT ssh localhost -o "StrictHostKeyChecking no" -S $BASEDIR/var/$2.tksock "echo tk") != "tk" ]]; then
+        ssh localhost -O exit -S $BASEDIR/var/$2.tksock
+        echo "Killing connection to $2. Trying again." | dbg
+      fi
+    done
+    exit
+  ;;
   FORKSCREEN )
-    while [[ -e "$BASEDIR/var/${2}.connected" ]]; do
+    while true; do
       echo $$ > "$BASEDIR/var/${2}.screen"
       connect $2
+      sleep 5
     done
     exit
   ;;
   start)
     [[ -e "$BASEDIR/var/tunnelkeeper.pid" ]] && exit
     echo $$ > "$BASEDIR/var/tunnelkeeper.pid"
-    cat "$SSHCONF" | awk '/^Host / {print $2}' | xargs -I% -P0 $0 FORKSTART % &
+    cat "$SSHCONF" | awk '/^Host / {print $2}' | xargs -I% -P0 $0 FORKSTART % '#tunnelkeeper' &
   ;;
   stop )
     rm -f "$BASEDIR/var/tunnelkeeper.pid"
-    rm -f "$BASEDIR/var/*.connected"
-    pkill -f 'tunnelkeeper' &>/dev/null
+    pkill -f '#tunnelkeeper' &>/dev/null
   ;;
   restart ) 
     if systemctl status tunnelkeeper &>/dev/null; then
@@ -85,7 +100,7 @@ case "$1" in
   ;;
   install )
     ruroot
-    which screen &>/dev/null || yum install -y screen || apt install -y screen
+    which screen &>/dev/null || yum install -y screen || apt install -y screen || echo "Couldn't install screen"
     mkdir -p /opt/tunnelkeeper/var
     mkdir -p /opt/tunnelkeeper/etc
     if [[ "$BASEDIR" != '/opt/tunnelkeeper/' ]]; then
@@ -121,7 +136,7 @@ WantedBy=multi-user.target" > /lib/systemd/system/tunnelkeeper.service
   ;;
   list )
     echo "---"
-    find "$BASEDIR/var/" -name '*.connected' | sed 's/^.*\///g; s/\.connected//g'
+    find "$BASEDIR/var/" -name '*.tksock' | sed 's/^.*\///g; s/\.tksock//g'
     echo "---"
   ;;
   config )
