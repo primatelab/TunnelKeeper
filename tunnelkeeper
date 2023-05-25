@@ -42,8 +42,9 @@ function debugopt () {
 }
 
 function dbg () {
-  read line
-  [[ "$(awk "/^$1/ {print \$2}" ${DEBUGCONF})" =~ "[123]" ]] && echo $line >> "$BASEDIR/var/tunnelkeeper-$(date +"%Y%m%d").log"
+  while read line; do
+    [[ "$(awk "/^$1/ {print \$2}" ${DEBUGCONF})" =~ "[123]" ]] && echo $line >> "$BASEDIR/var/tunnelkeeper-$(date +"%Y%m%d").log"
+  done
 }
 
 function connect () {
