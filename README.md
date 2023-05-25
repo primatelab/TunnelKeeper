@@ -3,7 +3,9 @@
 
 Install it as a service with `tunnelkeeper install`.
 
-Edit the config file `/opt/tunnelkeeper/etc/tunnelkeeper.conf`. If you make changes to tunnelkeeper.conf, run `systemctl restart tunnelkeeper`.
+Edit the config file with `tunnelkeeper config` (or edit `etc/tunnelkeeper.conf` manually).
+
+If you make changes to tunnelkeeper.conf, run `tunnelkeeper restart` or `systemctl restart tunnelkeeper`.
 
 - It's an ssh config file, so see `man ssh_config` for information. TunnelKeeper will connect to each host listed, and make sure every connection in `tunnelkeeper.conf` stays open in the background.
 - There are 3 options that aren't available in normal ssh config files:
