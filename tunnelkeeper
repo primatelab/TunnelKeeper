@@ -1,18 +1,30 @@
 #!/usr/bin/env bash
 
-REALPATH="$(realpath $0)"
+REALPATH="$(realpath "$0")"
 BASEDIR="${REALPATH%/*}"
 
-if [[ "${1}" == "start" ]]; then
-  rm $BASEDIR/var/*.conf &>/dev/null         # Create separate .conf files in var/ from etc/tunnelkeeper.conf
-  awk -v "dir=$BASEDIR/var" '
-    /^\[/ {sec=$1}
-    !/^[#\[]/ {print >> dir"/"sec".conf"}' < $BASEDIR/etc/tunnelkeeper.conf &>/dev/null
-fi
+SSHCONF="$BASEDIR/var/ssh.conf"
+PWCONF="$BASEDIR/var/passwords.conf"
+WATCHCONF="$BASEDIR/var/watch.conf"
+DEBUGCONF="$BASEDIR/var/debug.conf"
 
-SSHCONF="$BASEDIR/var/[ssh].conf"
-TKCONF="$BASEDIR/var/[settings].conf"
-PWCONF="$BASEDIR/var/[passwords].conf"
+function genconfig () {
+  mkdir -p "$BASEDIR/var"
+  cat <<EOF > "$SSHCONF"
+Host *
+  ExitOnForwardFailure yes
+  TCPKeepAlive yes
+  ServerAliveInterval 15
+  ServerAliveCountMax 3
+  ControlMaster auto
+  StrictHostKeyChecking no
+
+EOF
+  cat "$BASEDIR/etc/tunnelkeeper.conf" | sed 's/#.*$//g' | grep -v '^$' | grep -Eiv '^ *(watch|password|debug)' >> "$SSHCONF"
+  cat "$BASEDIR/etc/tunnelkeeper.conf" | grep -Ei '^( *watch|Host)' | awk '{print $1 " " $2}' | grep -i -B1 --no-group-separator watch | tr '\n' ' ' | sed 's/Host /\n/g; s/ *[Ww]atch//g' > "$WATCHCONF"
+  cat "$BASEDIR/etc/tunnelkeeper.conf" | grep -Ei '^( *password|Host)' | awk '{print $1 " " $2}' | grep -i -B1 --no-group-separator password | tr '\n' ' ' | sed 's/Host /\n/g; s/ *[Pp]assword//g' > "$PWCONF"
+  cat "$BASEDIR/etc/tunnelkeeper.conf" | grep -Ei '^( *debug|Host)' | awk '{print $1 " " $2}' | grep -i -B1 --no-group-separator debug | tr '\n' ' ' | sed 's/Host /\n/g; s/ *[Dd]ebug//g' > "$DEBUGCONF"
+}
 
 function ruroot () {
   if [[ $UID -ne 0 ]]; then
@@ -21,29 +33,28 @@ function ruroot () {
   fi
 }
 
-DEBUGLEVEL=$(awk '/^debug/ {print $2}' $TKCONF &>/dev/null)
-[[ -z $DEBUGLEVEL ]] && DEBUGLEVEL='0'
-case "$DEBUGLEVEL" in
-  2) dbgopt='-v';;
-  3) dbgopt='-vvv';;
-  *) dbgopt='';;
-esac
-
-TIMEOUT=$(awk '/^timeout/ {print $2}' $TKCONF &>/dev/null)
-[[ -z $TIMEOUT ]] && TIMEOUT='60'
+function debugopt () {
+  case "$(awk "/^$1/ {print \$2}" ${DEBUGCONF})" in
+    2) echo -n '-v';;
+    3) echo -n '-vvv';;
+    *) echo -n '';;
+  esac
+}
 
 function dbg () {
-  [[ $DEBUGLEVEL != "0" ]] && logger -t tunnelkeeper
+  read line
+  [[ "$(awk "/^$1/ {print \$2}" ${DEBUGCONF})" =~ "[123]" ]] && echo $line >> "$BASEDIR/var/tunnelkeeper-$(date +"%Y%m%d").log"
 }
 
 function connect () {
-  ssh -F "${SSHCONF}" $dbgopt -o "ControlMaster auto" -o "StrictHostKeyChecking no" -S "$BASEDIR/var/$1.tksock" -N $1 '#tunnelkeeper' 2>&1 | dbg
+  bo="$(debugopt $1)"
+  ssh -F "${SSHCONF}" $bo -S "$BASEDIR/var/$1.tksock" -N $1 '#tunnelkeeper' 2>&1 | dbg $1
 }
 
 
 case "$1" in
   FORKSTART )
-    $0 FORKWATCH $2 '#tunnelkeeper' &
+    (grep "$2" $WATCHCONF &>/dev/null) && $0 FORKWATCH $2 '#tunnelkeeper' &
     if [[ $(grep -c "^$2" $PWCONF) -gt 0 ]]; then
       pass=$(awk "/^$2/ {print \$2}" ${PWCONF}) # password needed
       screen -d -m -S "tk${2}" $0 FORKSCREEN $2 '#tunnelkeeper'
@@ -63,13 +74,14 @@ case "$1" in
     fi
     exit
   ;;
-  FORKWATCH ) # makes sure the connection is still working, even if ssh doesn't drop it
+  FORKWATCH ) # makes sure the connection is still working, even if ssh doesn't drop it. Needs a login shell to work.
     while true; do
+      TIMEOUT=$(awk "/^$2/ {print \$2}" ${WATCHCONF})
       sleep $TIMEOUT
       echo "tick $2" | dbg
       if [[ $(timeout $TIMEOUT ssh localhost -o "StrictHostKeyChecking no" -S $BASEDIR/var/$2.tksock "echo tk") != "tk" ]]; then
         ssh localhost -O exit -S $BASEDIR/var/$2.tksock
-        echo "Killing connection to $2. Trying again." | dbg
+        echo "Killing connection to $2. Trying again." | dbg $2
       fi
     done
     exit
@@ -77,18 +89,20 @@ case "$1" in
   FORKSCREEN )
     while true; do
       echo $$ > "$BASEDIR/var/${2}.screen"
-      connect $2
+      connect $2 #$dbgopt
       sleep 5
     done
     exit
   ;;
   start)
     [[ -e "$BASEDIR/var/tunnelkeeper.pid" ]] && exit
+    genconfig
     echo $$ > "$BASEDIR/var/tunnelkeeper.pid"
-    cat "$SSHCONF" | awk '/^Host / {print $2}' | xargs -I% -P0 $0 FORKSTART % '#tunnelkeeper' &
+    cat "$BASEDIR/etc/tunnelkeeper.conf" | awk '/^Host / {print $2}' | xargs -I% -P0 $0 FORKSTART % '#tunnelkeeper' &
   ;;
   stop )
     rm -f "$BASEDIR/var/tunnelkeeper.pid"
+    rm -f "$BASEDIR/var/*.conf"
     pkill -f '#tunnelkeeper' &>/dev/null
   ;;
   restart ) 
@@ -131,8 +145,9 @@ WantedBy=multi-user.target" > /lib/systemd/system/tunnelkeeper.service
     rm /usr/local/bin/tunnelkeeper
     rm /lib/systemd/system/tunnelkeeper.service
     systemctl daemon-reload
+    cp -f /opt/tunnelkeeper/etc/tunnelkeeper.conf /opt/tunnelkeeper.conf.bak
     rm -rf /opt/tunnelkeeper
-    echo -e "\nTunnelKeeper service uninstalled.\n"
+    echo -e "\nTunnelKeeper service uninstalled. Config backup saved as /opt/tunnelkeeper.conf.bak \n"
   ;;
   list )
     echo "---"
